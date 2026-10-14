@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fetch fresh asset data before send, stake, unstake, and claim flows so validation, fee estimation, and confirmations never act on stale balances. When the assets migration is active, everything (including special assets) is fetched through an `AssetsController` one-time fetch with `forceUpdate` and `bypassServerCache`; otherwise the Snap syncs from Tron RPC and reads local state ([#390](https://github.com/MetaMask/internal-snaps/pull/390))
 
+### Fixed
+
+- Allow self-sends: building a native TRX or TRC-10 transfer to the sender's own address no longer fails. TronWeb's transaction builders reject such transfers client-side with "Cannot transfer ... to the same account", even though the Tron protocol supports them, which made self-send flows fail with a generic transaction error ([#454](https://github.com/MetaMask/internal-snaps/pull/454))
+
 ## [4.1.0]
 
 ### Added

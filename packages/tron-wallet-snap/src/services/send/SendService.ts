@@ -1,6 +1,6 @@
 import type { AnalyticsService, Logger } from '@metamask/snap-networks-utils';
 import { BigNumber } from 'bignumber.js';
-import type { TronWeb, Types as TronwebTypes } from 'tronweb';
+import { TronWeb, Types as TronwebTypes } from 'tronweb';
 
 import type { SnapClient } from '../../clients/snap/SnapClient';
 import type { TronWebFactory } from '../../clients/tronweb/TronWebFactory';
@@ -302,11 +302,27 @@ export class SendService {
     const tronWeb = this.#tronWebFactory.createClient(scope);
 
     const amountInSun = Number(trxToSun(amount));
-    const transaction = await tronWeb.transactionBuilder.sendTrx(
-      toAddress,
-      amountInSun,
-      account.address,
-    );
+
+    let transaction: TronwebTypes.Transaction<TronwebTypes.TransferContract>;
+
+    if (this.#isSelfSend(toAddress, account.address)) {
+      transaction = (await this.#buildSelfSendTransferTransaction({
+        tronWeb,
+        contractType: TronwebTypes.ContractType.TransferContract,
+        value: {
+          to_address: TronWeb.address.toHex(toAddress),
+          owner_address: TronWeb.address.toHex(account.address),
+          amount: amountInSun,
+        },
+      })) as TronwebTypes.Transaction<TronwebTypes.TransferContract>;
+    } else {
+      transaction = await tronWeb.transactionBuilder.sendTrx(
+        toAddress,
+        amountInSun,
+        account.address,
+      );
+    }
+
     this.#setFeeLimit(tronWeb, transaction, feeLimit);
     return transaction;
   }
@@ -334,12 +350,28 @@ export class SendService {
 
     const rawAmount = Number(toRawAmount(amount, decimals));
 
-    const transaction = await tronWeb.transactionBuilder.sendToken(
-      toAddress,
-      rawAmount,
-      tokenId,
-      account.address,
-    );
+    let transaction: TronwebTypes.Transaction<TronwebTypes.TransferAssetContract>;
+
+    if (this.#isSelfSend(toAddress, account.address)) {
+      transaction = (await this.#buildSelfSendTransferTransaction({
+        tronWeb,
+        contractType: TronwebTypes.ContractType.TransferAssetContract,
+        value: {
+          to_address: TronWeb.address.toHex(toAddress),
+          owner_address: TronWeb.address.toHex(account.address),
+          asset_name: TronWeb.fromUtf8(tokenId).replace(/^0x/u, ''),
+          amount: rawAmount,
+        },
+      })) as TronwebTypes.Transaction<TronwebTypes.TransferAssetContract>;
+    } else {
+      transaction = await tronWeb.transactionBuilder.sendToken(
+        toAddress,
+        rawAmount,
+        tokenId,
+        account.address,
+      );
+    }
+
     this.#setFeeLimit(tronWeb, transaction, feeLimit);
     return transaction;
   }
@@ -462,6 +494,82 @@ export class SendService {
     });
 
     return result;
+  }
+
+  /**
+   * Checks whether the recipient is the sender, comparing addresses in hex
+   * form so Base58 and hex encodings of the same account are both detected.
+   *
+   * @param toAddress - The recipient address.
+   * @param ownerAddress - The sender address.
+   * @returns True when both addresses refer to the same account.
+   */
+  #isSelfSend(toAddress: string, ownerAddress: string): boolean {
+    try {
+      return (
+        TronWeb.address.toHex(toAddress).toLowerCase() ===
+        TronWeb.address.toHex(ownerAddress).toLowerCase()
+      );
+    } catch (error) {
+      this.#logger.warn({ error }, 'Failed to compare addresses for self-send');
+      return false;
+    }
+  }
+
+  /**
+   * Builds a transfer transaction for a self-send, replicating what TronWeb's
+   * `sendTrx` and `sendToken` builders do, minus their recipient validation:
+   * the validators reject self-sends with "Cannot transfer ... to the same
+   * account", even though the Tron protocol allows them.
+   *
+   * @param options - The options object.
+   * @param options.tronWeb - The TronWeb client used to generate the
+   * transaction metadata.
+   * @param options.contractType - The contract type of the transfer.
+   * @param options.value - The contract parameter value.
+   * @returns The unsigned transfer transaction.
+   */
+  async #buildSelfSendTransferTransaction({
+    tronWeb,
+    contractType,
+    value,
+  }: {
+    tronWeb: TronWeb;
+    contractType: TronwebTypes.ContractType;
+    value: TronwebTypes.TransferContract | TronwebTypes.TransferAssetContract;
+  }): Promise<
+    | TronwebTypes.Transaction<TronwebTypes.TransferContract>
+    | TronwebTypes.Transaction<TronwebTypes.TransferAssetContract>
+  > {
+    const transaction = {
+      visible: false,
+      txID: '',
+      raw_data_hex: '',
+      raw_data: {
+        contract: [
+          {
+            parameter: {
+              value,
+              type_url: `type.googleapis.com/protocol.${contractType}`,
+            },
+            type: contractType,
+          },
+        ],
+        ...(await tronWeb.trx.getCurrentRefBlockParams()),
+      },
+    } as TronwebTypes.Transaction<TronwebTypes.TransferContract> &
+      TronwebTypes.Transaction<TronwebTypes.TransferAssetContract>;
+
+    const transactionPb = tronWeb.utils.transaction.txJsonToPb(transaction);
+
+    transaction.txID = tronWeb.utils.transaction
+      .txPbToTxID(transactionPb)
+      .replace(/^0x/u, '');
+    transaction.raw_data_hex = tronWeb.utils.transaction
+      .txPbToRawDataHex(transactionPb)
+      .toLowerCase();
+
+    return transaction;
   }
 
   /**

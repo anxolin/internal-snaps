@@ -274,6 +274,8 @@ describe('SendService', () => {
     const TEST_ACCOUNT_ID = '550e8400-e29b-41d4-a716-446655440000';
     const TEST_TO_ADDRESS = 'TGJn1wnUYHJbvN88cynZbsAz2EMeZq73yx';
     const TEST_FROM_ADDRESS = 'TExvJsxzPyAZ2NtkrWgNKnbLkpqnFJ73DT';
+    const TEST_OWNER_HEX = '41a614f803b6fd780986a42c78ec9c7f77e6ded13c';
+    const TEST_SELF_ADDRESS = TronWeb.address.fromHex(TEST_OWNER_HEX);
 
     const scope = Network.Mainnet;
     const nativeTokenId = Networks[scope].nativeToken.id;
@@ -299,6 +301,18 @@ describe('SendService', () => {
         network: scope,
         symbol: 'USDT',
         decimals: 6,
+        rawAmount: '0',
+        uiAmount: '0',
+        iconUrl: '',
+      }) as AssetEntity;
+
+    const createTrc10Asset = (): AssetEntity =>
+      ({
+        assetType: `${scope}/trc10:1002000`,
+        keyringAccountId: TEST_ACCOUNT_ID,
+        network: scope,
+        symbol: 'TTT',
+        decimals: 0,
         rawAmount: '0',
         uiAmount: '0',
         iconUrl: '',
@@ -385,6 +399,12 @@ describe('SendService', () => {
         trx: {
           getCurrentBlock: jest.fn(),
           getBlockByNumber: jest.fn(),
+          getCurrentRefBlockParams: jest.fn().mockResolvedValue({
+            ref_block_bytes: '0123',
+            ref_block_hash: 'aabbccdd00112233',
+            expiration: 123456,
+            timestamp: 789,
+          }),
           sign: jest.fn(),
           sendRawTransaction: jest.fn(),
         },
@@ -1176,6 +1196,174 @@ describe('SendService', () => {
           expect.any(Array),
           TEST_FROM_ADDRESS,
         );
+      });
+
+      it('builds a self-send TRX transaction without TronWeb recipient validation', async () => {
+        const asset = createNativeAsset();
+        mockAccountsService.findByIdOrThrow.mockResolvedValue({
+          id: TEST_ACCOUNT_ID,
+          address: TEST_SELF_ADDRESS,
+          entropySource: 'test-entropy',
+          derivationPath: [],
+        });
+
+        const result = await sendService.buildTransaction({
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAddress: TEST_SELF_ADDRESS,
+          asset,
+          amount: new BigNumber(1),
+        });
+
+        expect(mockTronWeb.transactionBuilder.sendTrx).not.toHaveBeenCalled();
+        expect(result.raw_data.contract[0]).toStrictEqual({
+          type: 'TransferContract',
+          parameter: {
+            type_url: 'type.googleapis.com/protocol.TransferContract',
+            value: {
+              to_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+              owner_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+              amount: 1_000_000,
+            },
+          },
+        });
+        expect(result.raw_data).toMatchObject({
+          ref_block_bytes: '0123',
+          ref_block_hash: 'aabbccdd00112233',
+          expiration: 123456,
+          timestamp: 789,
+        });
+        expect(result.txID).toBe('mock-tx-id');
+        expect(result.raw_data_hex).toBe('1234567890abcdef');
+      });
+
+      it('detects a self-send when the recipient is the same account in hex encoding', async () => {
+        const asset = createNativeAsset();
+        mockAccountsService.findByIdOrThrow.mockResolvedValue({
+          id: TEST_ACCOUNT_ID,
+          address: TEST_SELF_ADDRESS,
+          entropySource: 'test-entropy',
+          derivationPath: [],
+        });
+
+        await sendService.buildTransaction({
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAddress: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+          asset,
+          amount: new BigNumber(1),
+        });
+
+        expect(mockTronWeb.transactionBuilder.sendTrx).not.toHaveBeenCalled();
+      });
+
+      it('builds a self-send TRC10 transaction without TronWeb recipient validation', async () => {
+        const asset = createTrc10Asset();
+        mockAccountsService.findByIdOrThrow.mockResolvedValue({
+          id: TEST_ACCOUNT_ID,
+          address: TEST_SELF_ADDRESS,
+          entropySource: 'test-entropy',
+          derivationPath: [],
+        });
+
+        const result = await sendService.buildTransaction({
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAddress: TEST_SELF_ADDRESS,
+          asset,
+          amount: new BigNumber(5),
+        });
+
+        expect(mockTronWeb.transactionBuilder.sendToken).not.toHaveBeenCalled();
+        expect(result.raw_data.contract[0]).toStrictEqual({
+          type: 'TransferAssetContract',
+          parameter: {
+            type_url: 'type.googleapis.com/protocol.TransferAssetContract',
+            value: {
+              to_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+              owner_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+              asset_name: TronWeb.fromUtf8('1002000').replace(/^0x/u, ''),
+              amount: 5,
+            },
+          },
+        });
+        expect(result.txID).toBe('mock-tx-id');
+        expect(result.raw_data_hex).toBe('1234567890abcdef');
+      });
+
+      it('still uses TronWeb builders when the recipient is another account', async () => {
+        const asset = createNativeAsset();
+
+        await sendService.buildTransaction({
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAddress: TEST_TO_ADDRESS,
+          asset,
+          amount: new BigNumber(1),
+        });
+
+        expect(mockTronWeb.transactionBuilder.sendTrx).toHaveBeenCalledWith(
+          TEST_TO_ADDRESS,
+          1_000_000,
+          TEST_FROM_ADDRESS,
+        );
+      });
+
+      it('validates a self-send like any other send', async () => {
+        const asset = createNativeAsset();
+        const amount = new BigNumber(1);
+
+        mockAssetsService.getAccountAssetsByIDs.mockResolvedValue([
+          { uiAmount: '24.10979', rawAmount: '24109790' },
+          { uiAmount: '24.10979', rawAmount: '24109790' },
+          { rawAmount: '1000' },
+          { rawAmount: '0' },
+        ]);
+        mockFeeCalculatorService.computeFee.mockResolvedValue([
+          {
+            type: FeeType.Base,
+            asset: {
+              unit: 'TRX',
+              type: nativeTokenId,
+              amount: '0',
+              fungible: true,
+            },
+          },
+        ]);
+
+        mockAccountsService.findByIdOrThrow.mockResolvedValue({
+          id: TEST_ACCOUNT_ID,
+          address: TEST_SELF_ADDRESS,
+          entropySource: 'test-entropy',
+          derivationPath: [],
+        });
+
+        const result = await sendService.validateSend({
+          scope,
+          fromAccountId: TEST_ACCOUNT_ID,
+          toAddress: TEST_SELF_ADDRESS,
+          asset,
+          amount,
+        });
+
+        expect(result).toStrictEqual({ valid: true });
+        expect(mockFeeCalculatorService.computeFee).toHaveBeenCalledWith({
+          scope,
+          transaction: expect.objectContaining({
+            raw_data: expect.objectContaining({
+              contract: [
+                expect.objectContaining({
+                  type: 'TransferContract',
+                  parameter: {
+                    type_url: 'type.googleapis.com/protocol.TransferContract',
+                    value: expect.objectContaining({
+                      to_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+                      owner_address: TronWeb.address.toHex(TEST_SELF_ADDRESS),
+                    }),
+                  },
+                }),
+              ],
+            }),
+          }),
+          availableEnergy: expect.any(BigNumber),
+          availableBandwidth: expect.any(BigNumber),
+        });
       });
     });
 
